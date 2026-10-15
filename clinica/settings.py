@@ -7,15 +7,18 @@ del archivo .env, que NO se sube a GitHub, usando python-dotenv.
 
 import os
 from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlparse
 
 from dotenv import load_dotenv
 
-# Carga las variables del archivo .env como variables de entorno.
-# Debe ejecutarse antes de usar os.getenv().
-load_dotenv()
-
 # Carpeta raíz del proyecto (la que contiene manage.py).
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Carga los secretos de la app desde .env y las variables que Neon escribe
+# con `neon deploy` desde .env.local. Debe ejecutarse antes de os.getenv().
+# .env va primero para que sus valores tengan prioridad.
+load_dotenv(BASE_DIR / '.env')
+load_dotenv(BASE_DIR / '.env.local')
 
 
 # ---------------------------------------------------------------------------
@@ -79,20 +82,54 @@ WSGI_APPLICATION = 'clinica.wsgi.application'
 
 
 # ---------------------------------------------------------------------------
-# Base de datos (PostgreSQL)
+# Base de datos (PostgreSQL en Neon)
 # ---------------------------------------------------------------------------
-# Los valores se toman del archivo .env para no exponer la contraseña.
+# `neon deploy` escribe en .env.local:
+#   DATABASE_URL          -> endpoint pooled (con -pooler), para la app.
+#   DATABASE_URL_UNPOOLED -> endpoint directo, para migraciones/pg_dump.
+# La app usa la pooled por defecto. Para migrar, exporta
+# DATABASE_URL="$DATABASE_URL_UNPOOLED" antes de `manage.py migrate`.
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.getenv('DB_NAME'),
-        'USER': os.getenv('DB_USER'),
-        'PASSWORD': os.getenv('DB_PASSWORD'),
-        'HOST': os.getenv('DB_HOST'),
-        'PORT': os.getenv('DB_PORT'),
+def _database_from_url(url):
+    """Convierte una URL de conexión de Postgres (Neon) al dict de Django."""
+
+    parts = urlparse(url)
+    query = parse_qs(parts.query)
+
+    # Opciones que Neon incluye en la URL y que Django pasa al driver.
+    options = {
+        clave: valores[0]
+        for clave, valores in query.items()
+        if clave in ('sslmode', 'channel_binding', 'options')
     }
-}
+
+    return {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': unquote(parts.path.lstrip('/')),
+        'USER': unquote(parts.username or ''),
+        'PASSWORD': unquote(parts.password or ''),
+        'HOST': parts.hostname or '',
+        'PORT': str(parts.port or ''),
+        'OPTIONS': options,
+    }
+
+
+DATABASE_URL = os.getenv('DATABASE_URL')
+
+if DATABASE_URL:
+    DATABASES = {'default': _database_from_url(DATABASE_URL)}
+else:
+    # Reserva: credenciales sueltas, por si no hay DATABASE_URL.
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': os.getenv('DB_NAME'),
+            'USER': os.getenv('DB_USER'),
+            'PASSWORD': os.getenv('DB_PASSWORD'),
+            'HOST': os.getenv('DB_HOST'),
+            'PORT': os.getenv('DB_PORT'),
+        }
+    }
 
 
 # ---------------------------------------------------------------------------
